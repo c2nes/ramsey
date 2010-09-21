@@ -6,11 +6,11 @@
 #include <string.h>
 
 /* Size of cliques to find */
-#define CLIQUE_N 4
+#define CLIQUE_N 5
 
 /* File to load matrix to check, and its degree */
-#define ADJ_MATRIX_FILE "g55.42"
-#define ADJ_MATRIX_ORDER 42
+#define ADJ_MATRIX_FILE "g55.43"
+#define ADJ_MATRIX_ORDER 43
 
 /* Debug flags */
 #define DUMP_CLIQUES 1

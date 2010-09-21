@@ -1,4 +1,18 @@
 
+/**
+ * Purpose: Given a 42-vertex complete graph with red/blue coloring such that no
+ *  monocromatic 5-clique exists, attempt to construct a 43-vertex complete graph
+ *  also containing no monocromatic 5-clique.
+ *
+ * Theory of operation: First the 42-vertex graph is loaded and all
+ *  monochromatic 4-cliques are located. Any monochromatic 5-clique in the
+ *  43-vetex graph will have one of these 4-cliques as a subgraph. Then the
+ *  possible colorings of the 43rd node are permuted over, checking each
+ *  coloring against each of the 4-cliques. If a graph is found which produces
+ *  no monochromatic 5-cliques, this graph is printed. If every graph is
+ *  attepmted without success, the program will simply exit.
+ */
+
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -14,6 +28,7 @@
 
 /* Debug flags */
 #define SHOW_PERMUTATIONS 0
+#define TRACK_MAX_SUCCESS 1
 
 /* Color of each edge (0 -> red, 1 -> blue) */
 typedef uint8_t color;
@@ -66,13 +81,15 @@ static color** load_matrix(void) {
         exit(EXIT_FAILURE);
     }
 
+    fclose(f);
+
     return adj;
 }
 
 static void dump_graph(color** matrix, int order) {
     for(int i = 0; i < order; i++) {
         for(int j = 0; j < order; j++) {
-            printf("%d ", matrix[i][j]);
+            printf("%d", matrix[i][j]);
         }
         printf("\n");
     }
@@ -107,17 +124,18 @@ static color** expand(color** matrix, int n) {
     return new_matrix;
 }
 
-/* Construct the next permutation of the edges of the new node.
- * O(n), n = order of the matrix
+/* Construct the next permutation of the edges of the new node. This only
+   permutes the row values of the new node (i.e. the column value shouldn't be
+   used). This is an optimization
+
+   O(n), n = order of the matrix
  */
 static inline bool next_graph(color** matrix, int order) {
     int i = 0;
     color* row = matrix[order - 1];
 
-    while(row[i] == 1 && i < order) {
+    while(row[i] && i != order) {
         row[i] = 0;
-        matrix[i][order - 1] = 0;
-        
         i++;
     }
 
@@ -126,57 +144,25 @@ static inline bool next_graph(color** matrix, int order) {
     }
     
     row[i] = 1;
-    matrix[i][order - 1] = 1;
 
     return true;
 }
 
-/* O(n), n = CLIQUE_N */
-static inline bool next_clique(uint16_t* state) {
-    int i, j;
+/* Check if a clique is monotone. Assumes the clique is presented in least to
+   greatest order, and that the first four nodes in the clique form a
+   monochromatic clique. Additionally, the color of the clique should be stored
+   after the clique values in clique[CLIQUE_N]
 
-    /* Think about AJD_MATRIX_ORDER bins with CLIQUE_N markers. We move the
-       right most marker by one to the right which can be moved without change
-       the relative order of the markers or causing a marker to leave the last
-       bin. When a marker is moved, all the markers to its right are moved into
-       the bins to its immediate right */
-
-    for(i = CLIQUE_N - 1; i >= 0; i--) {
-        /* We found a marker we can move */
-        if(state[i] < state[i + 1] - 1) {
-            /* Move the marker */
-            state[i]++;
-            
-            /* Move all markers further right to be after the one we just
-               moved */
-            for(j = i + 1; j < CLIQUE_N; j++) {
-                state[j] = state[j - 1] + 1;
-            }
-
-            /* The state has changed, return true */
-            return true;
-        }
-    }
-
-    /* Nothing could be moved (last combination) */
-    return false;
-}
-
-/* Worse case O(n^2), n = CLIQUE_N */
+   Worse case O(n^2), n = CLIQUE_N 
+*/
 static inline bool is_monochromatic(uint16_t* clique, color** matrix) {
-    color cc = matrix[clique[0]][clique[1]];
-    color* row;
-    int i, j;
+    color cc = (color) clique[CLIQUE_N];
+    color* row = matrix[clique[CLIQUE_N - 1]];
 
-    for(i = 0; i < CLIQUE_N; i++) {
-        row = matrix[clique[i]];
-
-        /* This only needs to be j = i + 1, but taking j = 0, and using
-           -funroll-loops this will be much faster */
-        for(j = 0; j < CLIQUE_N; j++) {
-            if(row[clique[j]] ^ cc) {
-                return false;
-            }
+    /* Only check the colors of the new edges */
+    for(int i = 0; i < CLIQUE_N - 1; i++) {
+        if(row[clique[i]] ^ cc) {
+            return false;
         }
     }
 
@@ -256,6 +242,8 @@ static uint16_t** find_monochromatic_n_cliques(color** matrix, int order, int n,
     } while(next_n_clique(current_clique, n));
     
     *cliques_found = count;
+    free(current_clique);
+
     return cliques;
 }
 
@@ -266,13 +254,10 @@ int main(void) {
     /* Order of the matix (i.e. the order of the complete graph) */
     int order = ADJ_MATRIX_ORDER;
 
-    /* The current clique being inspected */
-    uint16_t clique[CLIQUE_N + 1];
-
     /* Edge check */
     bool monochromatic = true;
 
-    /* Iterators */
+    /* Iterator */
     int i;
 
     /* 4-cliques */
@@ -282,8 +267,15 @@ int main(void) {
     /* Possible 5-cliques */
     uint16_t** five_cliques;
 
-    /* Clique count */
-    int count;
+    /* Number of graphs checked */
+    int count = 0;
+
+#if TRACK_MAX_SUCCESS
+    /* A permutation which fails, will fail after a set number of cliques being
+       checked. This keeps track of the largest number of cliques which had to
+       be checked to invalidate a permutation */
+    int max = 0;
+#endif
 
     matrix = load_matrix();
     printf("Successfully loaded matrix\n");
@@ -295,61 +287,67 @@ int main(void) {
     /* Construct a list of potential five cliques using the four cliques and the
        new node */
     five_cliques = malloc(sizeof(uint16_t*) * four_clique_count);
-    five_cliques[0] = malloc(sizeof(uint16_t) * 5 * four_clique_count);
+    five_cliques[0] = malloc(sizeof(uint16_t) * 8 * four_clique_count);
     for(i = 0; i < four_clique_count; i++) {
-        five_cliques[i] = five_cliques[0] + (i * 5);
+        five_cliques[i] = five_cliques[0] + (i * 8);
         memcpy(five_cliques[i], four_cliques[i], sizeof(uint16_t) * 4);
         five_cliques[i][4] = 42;
+        
+        /* Store the color of the clique as well */
+        five_cliques[i][5] = matrix[five_cliques[i][0]][five_cliques[i][1]];
+        
+        free(four_cliques[i]);
     }
+    free(four_cliques);
 
     /* Expand the matrix */
     matrix = expand(matrix, order);
     order++;
 
-    /* This "extra" element in the clique gives the order of the graph which
-       next_clique uses so that its algorithm is more consistent */
-    clique[CLIQUE_N] = order;
-
-    count = 0;
-
-    int max = 0;
     while(true) {
 #if SHOW_PERMUTATIONS
-        for(i = order; i > 0; i--) {
+        for(i = order - 1; i > 0; i--) {
             printf("%d", matrix[order - 1][i - 1]);
         }
         printf("\n");
 #endif
 
+        /* Check all cliques under this permutation */
         i = 0;
         while(i < four_clique_count && !(monochromatic = is_monochromatic(five_cliques[i], matrix))) {
             i++;
         }
+
+#if TRACK_MAX_SUCCESS
         if(i > max) {
             max = i;
-            for(i = order; i > 0; i--) {
-                printf("%d", matrix[order - 1][i - 1]);
+            for(int j = order - 1; j > 0; j--) {
+                printf("%d", matrix[order - 1][j - 1]);
             }
-            printf("\n");
+            printf(" (%d) \n", i);
         }
+#endif
 
         /* Successfully found a graph with 0 monochromatic cliques */
-        if(!monochromatic) {
+        if(monochromatic == false) {
+            printf("Found clique-less extension: \n\n");
+            dump_graph(matrix, order);
             break;
         }
 
-        if(!next_graph(matrix, order) || count == (1 << 22)) {
+        /* Attempt to move to the next graph */
+        if(next_graph(matrix, order) == false) {
             printf("Exhausted possibilities! No such extension of the current graph\n");
-            printf("%d\n", max);
-            exit(1);
+            break;
         }
 
         count++;
     }
 
-    /* Found a 0-clique matix! Woot! */
-    printf("Found clique-less extension: \n\n");
-    dump_graph(matrix, order);
+    free(matrix[0]);
+    free(matrix);
+    free(five_cliques[0]);
+    free(five_cliques);
     
     return 0;
 }
