@@ -26,12 +26,46 @@
 #define ADJ_MATRIX_FILE "g55.42"
 #define ADJ_MATRIX_ORDER 42
 
+/* Size of block that permutations of the edge colors are checked in (should be less than 32) */
+#define PERM_BLOCK_SIZE 22
+#define PERM_BLOCK_HIGH_MASK ((uint32_t)(~((1 << PERM_BLOCK_SIZE) - 1)))
+
 /* Debug flags */
 #define SHOW_PERMUTATIONS 0
 #define TRACK_MAX_SUCCESS 1
 
 /* Color of each edge (0 -> red, 1 -> blue) */
 typedef uint8_t color;
+
+struct Perm_s {
+    uint32_t perm;
+    struct Perm_s* prev;
+    struct Perm_s* next;
+};
+typedef struct Perm_s Perm;
+
+static color** load_matrix(void);
+static void dump_graph(color** matrix, int order);
+static void print_bin(uint32_t n, uint8_t width);
+static color** expand(color** matrix, int n);
+static inline bool next_graph(color** matrix, int order);
+static inline bool is_monochromatic(uint16_t* clique, color** matrix);
+
+static inline bool next_n_clique(uint16_t* clique, uint16_t size);
+static inline bool is_n_monochromatic(uint16_t* clique, int n, color** matrix);
+static uint16_t** find_monochromatic_n_cliques(color** matrix, int order, int n, int* cliques_found);
+
+static void perm_alloc(void);
+static void perm_init(void);
+static inline void perm_load(color** matrix, int order);
+static inline void perm_remove(Perm* p);
+static inline uint32_t next_perm_with_mask(uint32_t perm, uint32_t mask, uint16_t* clique, color cc);
+static inline void perm_mask(uint16_t* clique);
+static inline uint32_t perm_next(void);
+
+/* Permutation generator state */
+static Perm* perm_block;
+static Perm* perm_head;
 
 static color** load_matrix(void) {
     FILE* f;
@@ -131,8 +165,12 @@ static color** expand(color** matrix, int n) {
    O(n), n = order of the matrix
  */
 static inline bool next_graph(color** matrix, int order) {
+    static color* row = NULL;
     int i = 0;
-    color* row = matrix[order - 1];
+
+    if(row == NULL) {
+        row = matrix[order - 1];
+    }
 
     while(row[i] && i != order) {
         row[i] = 0;
@@ -156,8 +194,12 @@ static inline bool next_graph(color** matrix, int order) {
    Worse case O(n^2), n = CLIQUE_N 
 */
 static inline bool is_monochromatic(uint16_t* clique, color** matrix) {
+    static color* row = NULL;
     color cc = (color) clique[CLIQUE_N];
-    color* row = matrix[clique[CLIQUE_N - 1]];
+
+    if(row == NULL) {
+        row = matrix[clique[CLIQUE_N - 1]];
+    }
 
     /* Only check the colors of the new edges */
     for(int i = 0; i < CLIQUE_N - 1; i++) {
@@ -247,6 +289,135 @@ static uint16_t** find_monochromatic_n_cliques(color** matrix, int order, int n,
     return cliques;
 }
 
+static void print_bin(uint32_t n, uint8_t width) {
+    for(int i = width - 1; i >= 0; i--) {
+        printf("%d", (n >> i) & 1);
+    }
+    printf("\n");
+}
+
+static void perm_alloc(void) {
+    perm_block = malloc(sizeof(Perm) * (1 << PERM_BLOCK_SIZE));
+
+    for(uint32_t i = 0; i < 1 << PERM_BLOCK_SIZE; i++) {
+        perm_block[i].perm = i;
+    }
+}
+
+static void perm_init(void) {
+    for(uint32_t i = 0; i < (1 << PERM_BLOCK_SIZE) - 1; i++) {
+        perm_block[i].next = &(perm_block[i + 1]);
+    }
+
+    for(uint32_t i = 1; i < 1 << PERM_BLOCK_SIZE; i++) {
+        perm_block[i].prev = &(perm_block[i - 1]);
+    }
+
+    perm_head = perm_block;
+    perm_block[(1 << PERM_BLOCK_SIZE) - 1].next = NULL;
+    perm_block[0].prev = NULL;
+}
+
+static inline void perm_load(color** matrix, int order) {
+    uint32_t perm = perm_head->perm;
+
+    for(uint32_t i = 0; i < PERM_BLOCK_SIZE; i++) {
+        matrix[order - 1][i] = (perm >> i) & 1;
+    }
+}
+
+static inline void perm_remove(Perm* p) {
+    if(p->prev) {
+        p->prev->next = p->next;
+    } else {
+        perm_head = p->next;
+    }
+
+    if(p->next) {
+        p->next->prev = p->prev;
+    }
+
+    p->next = p->prev = NULL;
+}
+
+static inline uint32_t next_perm_with_mask(uint32_t perm, uint32_t mask, uint16_t* clique, color cc) {
+    uint32_t x_mask = mask;
+    int i;
+
+    if(cc) {
+        x_mask = 0;
+    }
+
+    perm += 1;
+    if(perm & PERM_BLOCK_HIGH_MASK) {
+        return 0;
+    }
+
+    if(((perm ^ x_mask) & mask) == mask) {
+        return perm;
+    }
+
+    for(i = CLIQUE_N - 1; i >= 0; i--) {
+        if(((perm >> clique[i]) & 1) != cc) {
+            /* Clear low bits */
+            perm &= ~((1 << clique[i]) - 1);
+            
+            /* Increment the permutation at the invalid bit */
+            perm += (1 << clique[i]);
+            
+            /* Add back in the rest of the mask */
+            perm |= mask;
+
+            break;
+        }
+    }
+
+    if(((perm ^ x_mask) & mask) == mask && (perm & PERM_BLOCK_HIGH_MASK) == 0) {
+        return perm;
+    } else {
+        return 0;
+    }
+}
+
+static inline void perm_mask(uint16_t* clique) {
+    color cc = (color) clique[CLIQUE_N];
+    uint32_t mask = 0;
+    uint32_t x_mask = 0;
+    uint32_t i;
+
+    for(int i = 0; i < CLIQUE_N - 1; i++) {
+        mask |= (1 << clique[i]);
+    }
+    
+    x_mask = mask;
+    if(cc) {
+        x_mask = 0;
+    }
+    
+    i = perm_head->perm;
+    if(((i ^ x_mask) & mask) != mask) {
+        i = next_perm_with_mask(i, mask, clique, cc);
+    }
+
+    do {
+        if(perm_block[i].next || perm_block[i].prev) {
+            perm_remove(&perm_block[i]);
+        }
+
+        i = next_perm_with_mask(i, mask, clique, cc);
+    } while(i);
+}
+
+static inline uint32_t perm_next(void) {
+    Perm* p = perm_head;
+    uint32_t v = p->perm;
+
+    perm_head = p->next;
+    p->next = NULL;
+
+    return v;
+}
+
 int main(void) {
     /* The adjacency matrix being inspected for mono-chromatic cliques */
     color** matrix;
@@ -276,6 +447,9 @@ int main(void) {
        be checked to invalidate a permutation */
     int max = 0;
 #endif
+
+    /* Allocate memory to the permutation generator */
+    perm_alloc();
 
     matrix = load_matrix();
     printf("Successfully loaded matrix\n");
@@ -336,7 +510,7 @@ int main(void) {
         }
 
         /* Attempt to move to the next graph */
-        if(next_graph(matrix, order) == false) {
+        if(next_graph(matrix, order) == false || count == (1 << 20)) {
             printf("Exhausted possibilities! No such extension of the current graph\n");
             break;
         }
