@@ -26,13 +26,15 @@
 #define ADJ_MATRIX_FILE "g55.42"
 #define ADJ_MATRIX_ORDER 42
 
-/* Size of block that permutations of the edge colors are checked in (should be less than 32) */
+/* Size in bits of the permutation space that will be held in memory (should be less than 32) */
 #define PERM_BLOCK_SIZE 26
 #define PERM_BLOCK_HIGH_MASK ((uint32_t)(~((1 << PERM_BLOCK_SIZE) - 1)))
+#define PERM_FILTER_PASSES 32
+#define PERM_SPACE_SIZE (1 << PERM_BLOCK_SIZE)
 
 /* Debug flags */
 #define SHOW_PERMUTATIONS 0
-#define TRACK_MAX_SUCCESS 0
+#define TRACK_MAX_SUCCESS 1
 
 /* Color of each edge (0 -> red, 1 -> blue) */
 typedef uint8_t color;
@@ -48,20 +50,23 @@ typedef struct Perm_s Perm;
 static color** load_matrix(void);
 static void dump_graph(color** matrix, int order);
 static void print_bin(uint32_t n, uint8_t width);
+
 static color** expand(color** matrix, int n);
 static inline bool next_graph(color** matrix, int order);
 static inline bool is_monochromatic(uint16_t* clique, color** matrix);
 
-static inline bool next_n_clique(uint16_t* clique, uint16_t size);
-static inline bool is_n_monochromatic(uint16_t* clique, int n, color** matrix);
+static bool next_n_clique(uint16_t* clique, uint16_t size);
+static bool is_n_monochromatic(uint16_t* clique, int n, color** matrix);
 static uint16_t** find_monochromatic_n_cliques(color** matrix, int order, int n, int* cliques_found);
 
 static void perm_alloc(void);
+static void perm_free(void);
 static void perm_init(void);
 static inline void perm_remove(Perm* p);
-static inline Perm* next_perm_with_mask(Perm* p, uint32_t mask, color cc);
+static inline Perm* perm_next_with_mask(Perm* p, uint32_t mask, color cc);
 static inline bool perm_mask(uint16_t* clique);
-static inline uint32_t perm_next(void);
+static void perm_regroup(void);
+static void perm_build_static_list(void);
 
 /* Permutation generator state */
 static Perm* perm_block = NULL;
@@ -134,6 +139,13 @@ static void dump_graph(color** matrix, int order) {
     }
 }
 
+static void print_bin(uint32_t n, uint8_t width) {
+    for(int i = width - 1; i >= 0; i--) {
+        printf("%d", (n >> i) & 1);
+    }
+    printf("\n");
+}
+
 /* Expand the given n by n matrix to be a n + 1 by n + 1 matrix with the
    original matrix embedded at 0, 0. New values are all initilized to 0 */
 static color** expand(color** matrix, int n) {
@@ -171,13 +183,12 @@ static color** expand(color** matrix, int n) {
  */
 static inline bool next_graph(color** matrix, int order) {
     static color* row = NULL;
-    uint32_t p;
+    uint32_t p, i;
 
     if(row == NULL) {
         row = matrix[order - 1];
     }
 
-    //if(perm_head == NULL) {
     if(perm_filtered == perm_filtered_end) {
         int i = PERM_BLOCK_SIZE;
 
@@ -191,18 +202,13 @@ static inline bool next_graph(color** matrix, int order) {
         }
 
         row[i] = 1;
-
-        //perm_init();
-        //perm_head = perm_reset_head;
         perm_filtered = perm_filtered_start;
     }
 
-    //p = perm_next();
-    //p = perm_head->perm;
-    //perm_head = perm_head->next;
     p = *perm_filtered;
     perm_filtered++;
-    for(uint32_t i = 0; i < PERM_BLOCK_SIZE; i++) {
+
+    for(i = 0; i < PERM_BLOCK_SIZE; i++) {
         row[i] = (p >> i) & 1;
     }
 
@@ -236,7 +242,7 @@ static inline bool is_monochromatic(uint16_t* clique, color** matrix) {
 
 /* Increment the given clique. If size = CLIQUE_N then next_clique should be
    used because it is much faster */
-static inline bool next_n_clique(uint16_t* clique, uint16_t size) {
+static bool next_n_clique(uint16_t* clique, uint16_t size) {
     int i, j;
 
     /* Think about AJD_MATRIX_ORDER bins with CLIQUE_N markers. We move the
@@ -267,7 +273,7 @@ static inline bool next_n_clique(uint16_t* clique, uint16_t size) {
 }
 
 /* Is the given n-clique monochromatic in matrix */
-static inline bool is_n_monochromatic(uint16_t* clique, int n, color** matrix) {
+static bool is_n_monochromatic(uint16_t* clique, int n, color** matrix) {
     color cc = matrix[clique[0]][clique[1]];
     color* row;
     int i, j;
@@ -312,18 +318,18 @@ static uint16_t** find_monochromatic_n_cliques(color** matrix, int order, int n,
     return cliques;
 }
 
-static void print_bin(uint32_t n, uint8_t width) {
-    for(int i = width - 1; i >= 0; i--) {
-        printf("%d", (n >> i) & 1);
-    }
-    printf("\n");
-}
-
 static void perm_alloc(void) {
     perm_block = malloc(sizeof(Perm) * (1 << PERM_BLOCK_SIZE));
 
     for(uint32_t i = 0; i < 1 << PERM_BLOCK_SIZE; i++) {
         perm_block[i].perm = i;
+    }
+}
+
+static void perm_free(void) {
+    free(perm_block);
+    if(perm_filtered_start != NULL) {
+        free(perm_filtered_start);
     }
 }
 
@@ -357,7 +363,7 @@ static inline void perm_remove(Perm* p) {
     perm_count--;
 }
 
-static inline Perm* next_perm_with_mask(Perm* p, uint32_t mask, color cc) {
+static inline Perm* perm_next_with_mask(Perm* p, uint32_t mask, color cc) {
     uint32_t x_mask = mask;
 
     if(cc) {
@@ -398,7 +404,7 @@ static inline bool perm_mask(uint16_t* clique) {
     }
 
     if(((p->perm ^ x_mask) & mask) != mask) {
-        p = next_perm_with_mask(p, mask, cc);
+        p = perm_next_with_mask(p, mask, cc);
     }
 
     while(p) {
@@ -409,14 +415,14 @@ static inline bool perm_mask(uint16_t* clique) {
         }
 
         if(p && ((p->perm ^ x_mask) & mask) != mask) {
-            p = next_perm_with_mask(p, mask, cc);
+            p = perm_next_with_mask(p, mask, cc);
         }
     }
 
     return true;
 }
 
-static inline void perm_regroup(void) {
+static void perm_regroup(void) {
     Perm* p = perm_head;
     uint32_t j = 0;
     
@@ -437,108 +443,19 @@ static inline void perm_regroup(void) {
     }
 }
 
-static inline uint32_t perm_next(void) {
+static void perm_build_static_list(void) {
     Perm* p = perm_head;
-    uint32_t v = p->perm;
+    uint32_t i = 0;
 
-    perm_head = p->next;
-    if(perm_head) {
-        perm_head->prev = NULL;
+    perm_filtered = malloc(perm_count * sizeof(uint32_t));
+    while(p) {
+        perm_filtered[i] = p->perm;
+        p = p->next;
+        i++;
     }
 
-    p->prev = p->next = NULL;
-
-    perm_count--;
-
-    return v;
-}
-
-static inline uint32_t clique_to_mask(uint16_t* clique) {
-    uint32_t mask = 0;
-
-    for(int i = 0; i < CLIQUE_N - 1; i++) {
-        if(clique[i] < 32) {
-            mask |= (1 << clique[i]);
-        } else {
-            return 0;
-        }
-    }
-
-    return mask;
-}
-
-static inline uint16_t overlap_factor(uint32_t mask1, uint32_t mask2) {
-    uint32_t mask_overlap;
-    uint16_t overlap = 0;
-    
-    mask_overlap = mask1 & mask2;
-    
-    while(mask_overlap) {
-        overlap += mask_overlap & 1;
-        mask_overlap >>= 1;
-    }
-
-    return overlap;
-}
-
-static inline uint16_t** sort_cliques(uint16_t** cliques, int clique_count) {
-    uint16_t** new_cliques = malloc(clique_count * sizeof(uint16_t*));
-    uint16_t copied = 0;
-    uint32_t mask, temp_mask;
-    uint16_t min_over, min_i, over, i, last_color;
-    new_cliques[0] = malloc(clique_count * 8 * sizeof(uint16_t));
-    
-    for(i = 0; i < clique_count; i++) {
-        new_cliques[i] = new_cliques[0] + (i * 8);
-    }
-
-    memcpy(new_cliques[0], cliques[0], sizeof(uint16_t) * 8);
-    cliques[0][6] = 1;
-    last_color = cliques[0][5];
-    mask = clique_to_mask(cliques[0]);
-    copied++;
-
-    while(copied < clique_count) {
-        min_i = 0;
-        min_over = 1024;
-
-        for(i = 0; i < clique_count; i++) {
-            if(cliques[i][6] == 0 && cliques[i][5] != last_color) {
-                temp_mask = clique_to_mask(cliques[i]);
-                if(temp_mask) {
-                    over = overlap_factor(mask, temp_mask);
-                    if(over < min_over) {
-                        min_over = over;
-                        min_i = i;
-                    }
-                }
-            }
-        }
-
-        if(min_over < 1024) {
-            memcpy(new_cliques[copied], cliques[min_i], sizeof(uint16_t) * 8);
-            cliques[min_i][6] = 1;
-            mask |= clique_to_mask(cliques[min_i]);
-            last_color = cliques[min_i][5];
-            copied++;
-        } else {
-            break;
-        }
-    }
-
-    for(i = 0; i < clique_count; i++) {
-        if(cliques[i][6] == 0) {
-            memcpy(new_cliques[copied], cliques[i], sizeof(uint16_t) * 8);
-            cliques[i][6] = 1;
-            copied++;
-        }
-    }
-
-    if(copied != clique_count) {
-        printf(":(\n");
-    }
-
-    return new_cliques;
+    perm_filtered_start = perm_filtered;
+    perm_filtered_end = perm_filtered + perm_count;
 }
 
 int main(void) {
@@ -552,7 +469,7 @@ int main(void) {
     bool monochromatic = true;
 
     /* Iterator */
-    int i;
+    int i, j;
 
     /* 4-cliques */
     uint16_t** four_cliques;
@@ -560,9 +477,6 @@ int main(void) {
 
     /* Possible 5-cliques */
     uint16_t** five_cliques;
-
-    /* Number of graphs checked */
-    int count = 0;
 
 #if TRACK_MAX_SUCCESS
     /* A permutation which fails, will fail after a set number of cliques being
@@ -603,67 +517,30 @@ int main(void) {
     matrix = expand(matrix, order);
     order++;
 
-    /* Sort, lol */
-#if 0
-    five_cliques = sort_cliques(five_cliques, four_clique_count);
-
-    for(i = 0; i < 100; i++) {
-        print_bin(((1 << five_cliques[i][0]) |
-                   (1 << five_cliques[i][1]) |
-                   (1 << five_cliques[i][2]) |
-                   (1 << five_cliques[i][3])), 32);
-            
-    }
-#endif
-
-    int s;
-    int last_resize = perm_count;
-    Perm* p;
-    printf("Filtering... ");fflush(stdout);
-    s = perm_count;
-#if 0
-    for(i = 0; i < four_clique_count; i++) {
-        if(perm_mask(five_cliques[i])) {
-            printf("Removed %.2f%% of permutations\n", 100 * ((float)s - perm_count) / s);
+    /* Filter out as many permuatations as possible given the set of cliques */
+    printf("Filtering..."); fflush(stdout);
+    for(i = 0; i < PERM_FILTER_PASSES; i++) {
+        for(j = i; j < four_clique_count; j += PERM_FILTER_PASSES) {
+            perm_mask(five_cliques[j]);
         }
 
-        if(perm_count < (last_resize >> 1) && perm_count > 1024) {
-            printf("Regrouping\n");
-            last_resize = perm_count;
-            perm_regroup();
-        }
-    }
-#else
-#define BLOCKY 32
-    for(int j = 0; j < BLOCKY; j++) {
-        for(i = j; i < four_clique_count; i += BLOCKY) {
-            if(perm_mask(five_cliques[i])) {
-                printf("Removed %.2f%% of permutations\n", 100 * ((float)s - perm_count) / s);
-            }
-        }
-        printf("Next group\n");
+        printf("."); fflush(stdout);
         perm_regroup();
     }
-#endif
-    printf("Done! Removed %.2f%% of permutations (%u/%u)\n", 100 * ((float)s - perm_count) / s, s - perm_count, s);
-    printf("Permutation space: %u\n", (1 << (order - PERM_BLOCK_SIZE)) * perm_count);
-    printf("Load factor: %.4f\n",   ((float)((1 << ((order - PERM_BLOCK_SIZE) - 16)) * perm_count)) / (1 << 20) );
+
+    /* Report on filtering success */
+    printf("done!\nRemoved %.2f%% of permutations (%u/%u)\n",
+           (100 * ((float)PERM_SPACE_SIZE - perm_count) / PERM_SPACE_SIZE),
+           (PERM_SPACE_SIZE - perm_count),
+           (PERM_SPACE_SIZE));
+    printf("Permutation space: %u\n",
+           ((1 << (order - PERM_BLOCK_SIZE)) * perm_count));
+    printf("Load factor: %.4f\n",
+           (((float)((1 << ((order - PERM_BLOCK_SIZE) - 16)) * perm_count)) / (1 << 20)));
     perm_reset_head = perm_head;
-    exit(0);
 
-    perm_filtered = malloc(perm_count * sizeof(uint32_t));
-
-    p = perm_head;
-    i = 0;
-    while(p) {
-        perm_filtered[i] = p->perm;
-        p = p->next;
-        i++;
-    }
-    perm_filtered_start = perm_filtered;
-    perm_filtered_end = perm_filtered + perm_count;
-
-    int large_blocks = 0;
+    /* Build the static list of permutations */
+    perm_build_static_list();
 
     while(true) {
         /* Attempt to move to the next graph */
@@ -672,21 +549,13 @@ int main(void) {
             break;
         }
 
-#if 1
+#if SHOW_PERMUTATIONS
         if(perm_filtered == perm_filtered_end) {
             for(i = order - 1; i > 0; i--) {
                 printf("%d", matrix[order - 1][i - 1]);
             }
             printf("\n");
-            large_blocks++;
         }
-#endif
-
-#if SHOW_PERMUTATIONS
-        for(i = order - 1; i > 0; i--) {
-            printf("%d", matrix[order - 1][i - 1]);
-        }
-        printf("\n");
 #endif
 
         /* Check all cliques under this permutation */
@@ -708,13 +577,18 @@ int main(void) {
         /* Successfully found a graph with 0 monochromatic cliques */
         if(monochromatic == false) {
             printf("Found clique-less extension: \n\n");
+
+            /* Populate the last column before dumping */
+            for(i = 0; i < order - 1; i++) {
+                matrix[i][order - 1] = matrix[order - 1][i];
+            }
+
             dump_graph(matrix, order);
             break;
         }
-
-        count++;
     }
 
+    perm_free();
     free(matrix[0]);
     free(matrix);
     free(five_cliques[0]);
