@@ -34,7 +34,7 @@
 
 /* Debug flags */
 #define SHOW_PERMUTATIONS 0
-#define TRACK_MAX_SUCCESS 1
+#define TRACK_MAX_SUCCESS 0
 
 /* Color of each edge (0 -> red, 1 -> blue) */
 typedef uint8_t color;
@@ -485,10 +485,6 @@ int main(void) {
     int max = 0;
 #endif
 
-    /* Allocate memory to the permutation generator */
-    perm_alloc();
-    perm_init();
-
     matrix = load_matrix();
     printf("Successfully loaded matrix\n");
 
@@ -517,6 +513,12 @@ int main(void) {
     matrix = expand(matrix, order);
     order++;
 
+    /* Allocate memory to the permutation generator */
+    printf("Allocating perumatation filter..."); fflush(stdout);
+    perm_alloc();
+    perm_init();
+    printf("done.\n");
+
     /* Filter out as many permuatations as possible given the set of cliques */
     printf("Filtering..."); fflush(stdout);
     for(i = 0; i < PERM_FILTER_PASSES; i++) {
@@ -542,6 +544,9 @@ int main(void) {
     /* Build the static list of permutations */
     perm_build_static_list();
 
+    int cc;
+    int min = four_clique_count;
+
     while(true) {
         /* Attempt to move to the next graph */
         if(next_graph(matrix, order) == false) {
@@ -558,11 +563,31 @@ int main(void) {
         }
 #endif
 
+
+#if 0
         /* Check all cliques under this permutation */
+        i = 0;
+        cc = 0;
+        while(i < four_clique_count) {
+            if(is_monochromatic(five_cliques[i], matrix)) {
+                cc++;
+            }
+            i++;
+        }
+
+        if(cc < min) {
+            min = cc;
+            for(int j = order - 1; j > 0; j--) {
+                printf("%d", matrix[order - 1][j - 1]);
+            }
+            printf(" (%d) \n", cc);
+        }
+#else
         i = 0;
         while(i < four_clique_count && !(monochromatic = is_monochromatic(five_cliques[i], matrix))) {
             i++;
         }
+#endif
 
 #if TRACK_MAX_SUCCESS
         if(i > max) {

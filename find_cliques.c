@@ -9,8 +9,8 @@
 #define CLIQUE_N 5
 
 /* File to load matrix to check, and its degree */
-#define ADJ_MATRIX_FILE "g55.43"
-#define ADJ_MATRIX_ORDER 43
+#define ADJ_MATRIX_FILE "g55.42"
+#define ADJ_MATRIX_ORDER 42
 
 /* Debug flags */
 #define DUMP_CLIQUES 1
@@ -62,6 +62,31 @@ static color** load_matrix(void) {
     }
 
     return adj;
+}
+
+static inline void swap_rows(color** matrix, int order, int n, int m) {
+    color* row_n = NULL;
+    color* row_m = NULL;
+
+    if(n == m) {
+        return;
+    }
+
+    row_n = malloc(order * sizeof(color));
+    row_m = malloc(order * sizeof(color));
+    memcpy(row_n, matrix[n], order * sizeof(color));
+    memcpy(row_m, matrix[m], order * sizeof(color));
+    memcpy(matrix[n], row_m, order * sizeof(color));
+    memcpy(matrix[m], row_n, order * sizeof(color));
+
+    /*
+    for(int i = 0; i < order; i++) {
+        matrix[i][m] = row_n[i];
+        matrix[i][n] = row_m[i];
+        }*/
+
+    free(row_n);
+    free(row_m);
 }
 
 /* Increment the given clique. If size = CLIQUE_N then next_clique should be
@@ -140,19 +165,39 @@ static uint16_t** find_monochromatic_n_cliques(color** matrix, int order, int n,
     return cliques;
 }
 
+static void dump_graph(color** matrix, int order) {
+    for(int i = 0; i < order; i++) {
+        for(int j = 0; j < order; j++) {
+            printf("%d", matrix[i][j]);
+        }
+        printf("\n");
+    }
+}
+
 int main(void) {
     /* The adjacency matrix being inspected for mono-chromatic cliques */
     color** matrix;
 
     /* Clique count */
-    uint16_t** cliques;
-    int count;
+    uint16_t** cliques = NULL;
+    int count = 0;
 
     matrix = load_matrix();
     printf("Successfully loaded matrix\n");
 
-    cliques = find_monochromatic_n_cliques(matrix, ADJ_MATRIX_ORDER, CLIQUE_N, &count);
-    printf("Found %d %d-cliques\n", count, CLIQUE_N);
+
+    for(int i = 0; i < ADJ_MATRIX_ORDER; i++) {
+        for(int j = i; j < ADJ_MATRIX_ORDER; j++) {
+            swap_rows(matrix, ADJ_MATRIX_ORDER, i, j);
+            dump_graph(matrix, ADJ_MATRIX_ORDER);
+            printf("\n");
+            cliques = find_monochromatic_n_cliques(matrix, ADJ_MATRIX_ORDER, CLIQUE_N, &count);
+            if(count > 0) {
+                printf("Found %d %d-cliques\n", count, CLIQUE_N);
+            }
+            swap_rows(matrix, ADJ_MATRIX_ORDER, i, j);
+        }
+    }
 
 #if DUMP_CLIQUES
     for(int i = 0; i < count; i++) {
